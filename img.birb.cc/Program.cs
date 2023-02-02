@@ -4,6 +4,18 @@ using Microsoft.AspNetCore.Http.Features;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 
+// TODO:
+// actually check fileheaders
+// fix salt for windows platforms
+// make a release
+// check foreach loops and use dict instead maybe possibly idk
+// hostname loaded from file
+// log file?
+// admin panel
+// key rotation
+
+string[] fileTypes = { ".jpg", ".jpeg", ".png", ".gif", ".mp4", ".mp3", ".wav" };
+
 var MyAllowSpecificOrigins = "_myAllowSpecificOrigins";
 
 var builder = WebApplication.CreateBuilder(args);
@@ -19,14 +31,16 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-string[] fileTypes = { ".jpg", ".jpeg", ".png", ".gif", ".mp4", ".mp3", ".wav" };
-
 app.UseForwardedHeaders(new ForwardedHeadersOptions
 {
     ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
 });
 
 app.UseHttpsRedirection();
+
+app.UseDefaultFiles();
+
+app.UseStaticFiles();
 
 app.MapPost("/api/img", async Task<IResult> (HttpRequest request) =>
 {
@@ -43,21 +57,36 @@ app.MapPost("/api/img", async Task<IResult> (HttpRequest request) =>
         return Results.Unauthorized();
     }
 
-    else
+    List<Img> temp = new List<Img>();
+    User user = UserDB.GetUserFromKey(key.Value);
+
+    foreach (var img in FileDB.GetDB())
     {
-        List<Img> temp = new List<Img>();
-        User user = UserDB.GetUserFromKey(key.Value);
-
-        foreach (var img in FileDB.GetDB())
+        if (img.UID == user.UID)
         {
-            if (img.UID == user.UID)
-            {
-                temp.Add(img);
-            }
+            temp.Add(img);
         }
-
-        return Results.Ok(temp);
     }
+
+    return Results.Ok(temp);
+});
+
+app.MapPost("/api/usr", async Task<IResult> (HttpRequest request) =>
+{
+    if (!request.HasFormContentType)
+    {
+        return Results.BadRequest();
+    }
+
+    var form = await request.ReadFormAsync();
+    var key = form.ToList().Find(key => key.Key == "api_key");
+
+    if (key.Key is null || UserDB.GetUserFromKey(key.Value) is null) // invalid key
+    {
+        return Results.Unauthorized();
+    }
+
+    return Results.Ok(UserDB.GetDB().Find(uid => uid.UID == UserDB.GetUserFromKey(key.Value).UID)!.UsrToDTO());
 });
 
 app.MapPost("/api/usr/new", async Task<IResult> (HttpRequest request) =>
@@ -123,20 +152,7 @@ app.MapPost("/api/usr/new", async Task<IResult> (HttpRequest request) =>
 
     UserDB.AddUser(newUser);
 
-    string SXCU = "{\n";
-    SXCU += "\"Version\": \"13.7.0\",\n";
-    SXCU += "\"Name\": \"birb.cc\",\n";
-    SXCU += "\"DestinationType\": \"ImageUploader\",\n";
-    SXCU += "\"RequestMethod\": \"POST\",\n";
-    SXCU += $"\"RequestURL\": \"https://{newUser.Domain}/api/upload\",\n";
-    SXCU += "\"Body\": \"MultipartFormData\",\n";
-    SXCU += "\"Arguments\": {\n";
-    SXCU += $"\"api_key\": \"{NewKey}\"\n";
-    SXCU += "},\n";
-    SXCU += "\"FileFormName\": \"img\"\n";
-    SXCU += "}";
-
-    return Results.Text(SXCU);
+    return Results.Text(NewUsername + ": " + NewKey);
 });
 
 app.MapPost("/api/usr/settings", async Task<IResult> (HttpRequest request) =>
@@ -207,24 +223,6 @@ app.MapPost("/api/users", async Task<IResult> (HttpRequest request) =>
     return Results.Ok(UserDB.GetDB().Select(x => x.UsersToDTO()).ToList());
 });
 
-app.MapPost("/api/usr", async Task<IResult> (HttpRequest request) =>
-{
-    if (!request.HasFormContentType)
-    {
-        return Results.BadRequest();
-    }
-
-    var form = await request.ReadFormAsync();
-    var key = form.ToList().Find(key => key.Key == "api_key");
-
-    if (key.Key is null || UserDB.GetUserFromKey(key.Value) is null) // invalid key
-    {
-        return Results.Unauthorized();
-    }
-
-    return Results.Ok(UserDB.GetDB().Find(uid => uid.UID == UserDB.GetUserFromKey(key.Value).UID).UsrToDTO());
-});
-
 app.MapGet("/api/dashmsg", () =>
 {
     List<DashDTO> usrlist = new List<DashDTO>();
@@ -244,7 +242,7 @@ app.MapGet("/api/stats", async () =>
     Stats stats = new Stats();
     stats.Files = FileDB.GetDB().Count;
     stats.Users = UserDB.GetDB().Count;
-    DirectoryInfo dirInfo = new DirectoryInfo(@"img/");
+    DirectoryInfo dirInfo = new DirectoryInfo(@"wwwroot/");
     stats.Bytes = await Task.Run(() => dirInfo.EnumerateFiles("*", SearchOption.TopDirectoryOnly).Sum(file => file.Length));
     stats.Newest = FileDB.GetDB().Last().Timestamp;
 
@@ -253,7 +251,7 @@ app.MapGet("/api/stats", async () =>
 
 app.MapPost("/api/upload", async (http) =>
 {
-    http.Features.Get<IHttpMaxRequestBodySizeFeature>().MaxRequestBodySize = null; // removes max filesize (set max in NGINX, not here)
+    http.Features.Get<IHttpMaxRequestBodySizeFeature>()!.MaxRequestBodySize = null; // removes max filesize (set max in NGINX, not here)
 
 
     if (!http.Request.HasFormContentType)
@@ -293,15 +291,15 @@ app.MapPost("/api/upload", async (http) =>
 
     newFile.NewImg(user.UID, extension, img);
 
-    using (var stream = System.IO.File.Create("img/" + newFile.Filename))
+    using (var stream = System.IO.File.Create("wwwroot/" + newFile.Filename))
     {
         await img.CopyToAsync(stream);
     }
 
     Console.WriteLine($"New File: {newFile.Filename}");
-    string[] domains = user.Domain.Split("\r\n");
+    string[] domains = user.Domain!.Split("\r\n");
     string domain = domains[Hashing.rand.Next(domains.Length)];
-    
+
     await http.Response.WriteAsync($"{(user.ShowURL ? "​" : "")}https://{domain}/" + newFile.Filename); // First "" contains zero-width space
     return;
 });
@@ -339,7 +337,7 @@ app.MapDelete("/api/delete/{hash}", async Task<IResult> (HttpRequest request, st
 
 app.MapDelete("/api/nuke", async Task<IResult> (HttpRequest request) =>
 {
-    if (!request.HasFormContentType )
+    if (!request.HasFormContentType)
     {
         return Results.BadRequest();
     }
@@ -353,7 +351,7 @@ app.MapDelete("/api/nuke", async Task<IResult> (HttpRequest request) =>
     }
 
     FileDB.Nuke(UserDB.GetUserFromKey(key.Value));
- 
+
     return Results.Ok();
 });
 
@@ -399,7 +397,7 @@ public static class Hashing
     public static string HashString(string input) // yes, i know the use of "hash" is very inconsistent. shut up.
     {
         byte[] hash;
-        using (SHA512 shaM = new SHA512Managed())
+        using (SHA512 shaM = SHA512.Create())
         {
             hash = shaM.ComputeHash(System.Text.Encoding.UTF8.GetBytes(input + salt));
         }
@@ -445,7 +443,7 @@ public static class FileDB
 
     public static void Add(Img file)
     {
-        if (Find(file.Hash) is null)
+        if (Find(file.Hash!) is null)
         {
             db.Add(file);
             Save();
@@ -460,7 +458,7 @@ public static class FileDB
             {
                 string json = SR.ReadToEnd();
 
-                db = JsonConvert.DeserializeObject<List<Img>>(json);
+                db = JsonConvert.DeserializeObject<List<Img>>(json)!;
                 Save();
             }
             Console.WriteLine($"Loaded DB of length {db.Count}");
@@ -497,20 +495,20 @@ public static class FileDB
         db.Remove(file);
         Save();
 
-        File.Delete("img/" + file.Filename);
+        File.Delete("wwwroot/" + file.Filename);
         Console.WriteLine("Removed file " + file.Filename);
     }
 
     public static void Nuke(User user)
     {
-        List<Img> temp = new List<Img>(db);
+        List<Img> images = new List<Img>(db);
 
-        foreach (Img img in temp)
+        foreach (Img img in images)
         {
             if (img.UID == user.UID)
             {
                 db.Remove(img);
-                File.Delete("img/" + img.Filename);
+                File.Delete("wwwroot/" + img.Filename);
             }
         }
         Console.WriteLine($"nuked {user.Username}");
@@ -555,7 +553,7 @@ public class User
     public int UploadCount { get; set; } = 0;
     public long UploadedBytes { get; set; } = 0;
     public string? APIKey { get; set; }
-    public string? Domain { get; set; } = "img.birb.cc";
+    public string Domain { get; set; } = "img.birb.cc";
     public string? DashMsg { get; set; }
     public bool ShowURL { get; set; }
 
@@ -610,12 +608,12 @@ public class UsrDTO // used for /api/usr
     public int UID { get; set; }
     public int UploadCount { get; set; } = 0;
     public long UploadedBytes { get; set; } = 0;
-    public string? Domain { get; set; } = "img.birb.cc";
+    public string Domain { get; set; } = "img.birb.cc";
     public string? DashMsg { get; set; }
     public bool ShowURL { get; set; }
 }
 
-public class DashDTO // userd for /api/dashmsg
+public class DashDTO // used for /api/dashmsg
 {
     public string? Username { get; set; }
     public string? DashMsg { get; set; }
@@ -634,17 +632,17 @@ public static class UserDB
             {
                 string json = SR.ReadToEnd();
 
-                db = JsonConvert.DeserializeObject<List<User>>(json);
+                db = JsonConvert.DeserializeObject<List<User>>(json)!;
                 Save();
             }
-            Console.WriteLine($"Loaded DB of length {db.Count}");
+            Console.WriteLine($"Loaded DB of length {db!.Count}");
         }
         catch
         {
             Console.WriteLine($"Unable to load {path}");
         }
 
-        if (!File.Exists(path) || db.Count == 0) // Generate default admin account
+        if (!File.Exists(path) || db!.Count == 0) // Generate default admin account
         {
             string apikey = Hashing.NewHash(40);
             Console.WriteLine("Generated default Admin account");
@@ -655,10 +653,11 @@ public static class UserDB
                 UID = 0,
                 UploadCount = 0,
                 APIKey = Hashing.HashString(apikey),
+                DashMsg = "literally sharex compatible",
                 ShowURL = true,
                 Domain = "img.birb.cc"
             };
-            Console.WriteLine("API-KEY: " + apikey + " \nKeep this safe");
+            Console.WriteLine("API-KEY: " + apikey + "\nKeep this safe!");
             AddUser(newUser);
         }
     }
